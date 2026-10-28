@@ -12,7 +12,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore-compat.js"></script>
 </head>
-<body class="bg-gray-100 min-h-screen">
+<body class="bg-gray-100 min-h-screen font-sans">
   <div id="root"></div>
 
   <script type="text/babel">
@@ -20,9 +20,9 @@
       apiKey: "AIzaSyAUfMZ8Dmhv6pYpCbidp1bEa5qiAPGIOgA",
       authDomain: "cricket-roster-845e1.firebaseapp.com",
       projectId: "cricket-roster-845e1",
-storageBucket: "cricket-roster-845e1.firebasestorage.app",
-    messagingSenderId: "665150167375",
-    appId: "1:665150167375:web:4eede345268acf5b9a8d3a",
+      storageBucket: "cricket-roster-845e1.firebasestorage.app",
+      messagingSenderId: "665150167375",
+      appId: "1:665150167375:web:4eede345268acf5b9a8d3a"
     };
 
     if (!firebase.apps.length) {
@@ -33,204 +33,643 @@ storageBucket: "cricket-roster-845e1.firebasestorage.app",
 
     const App = () => {
       const [user, setUser] = React.useState(null);
-      const [name, setName] = React.useState(localStorage.getItem('cricket_name') || '');
-      const [isNameSet, setIsNameSet] = React.useState(!!localStorage.getItem('cricket_name'));
+      const [name, setName] = React.useState(() => localStorage.getItem('cricket_name') || '');
+      const [isEditingName, setIsEditingName] = React.useState(() => !localStorage.getItem('cricket_name'));
+      
+      // Session Settings State
       const [weeklyCode, setWeeklyCode] = React.useState('');
+      const [matchDate, setMatchDate] = React.useState('');
+      const [paymentLink, setPaymentLink] = React.useState('');
+      
+      // Admin Form Inputs
+      const [adminDateInput, setAdminDateInput] = React.useState('');
+      const [adminLinkInput, setAdminLinkInput] = React.useState('');
+      
+      // Roster & History State
       const [inputCode, setInputCode] = React.useState('');
       const [players, setPlayers] = React.useState([]);
+      const [history, setHistory] = React.useState([]);
+      const [expandedHistoryId, setExpandedHistoryId] = React.useState(null);
+      
+      // UI State
       const [isAdmin, setIsAdmin] = React.useState(false);
       const [loading, setLoading] = React.useState(true);
       const [error, setError] = React.useState('');
+      const [statusMsg, setStatusMsg] = React.useState('');
 
       React.useEffect(() => {
         auth.signInAnonymously().catch(err => console.error(err));
         
-        auth.onAuthStateChanged((u) => {
+        const unsubscribeAuth = auth.onAuthStateChanged((u) => {
           setUser(u);
           setLoading(false);
         });
 
-        db.collection('settings').doc('session').onSnapshot(doc => {
+        const unsubscribeSession = db.collection('settings').doc('session').onSnapshot(doc => {
           if (doc.exists) {
-            setWeeklyCode(doc.data().code);
+            const data = doc.data();
+            setWeeklyCode(data.code || '');
+            setMatchDate(data.matchDate || '');
+            setPaymentLink(data.paymentLink || '');
+            setAdminDateInput(prev => prev === '' ? (data.matchDate || '') : prev);
+            setAdminLinkInput(prev => prev === '' ? (data.paymentLink || '') : prev);
           }
-        });
+        }, err => console.error(err));
 
-        db.collection('players').orderBy('timestamp', 'asc').onSnapshot(snapshot => {
+        const unsubscribePlayers = db.collection('players').orderBy('timestamp', 'asc').onSnapshot(snapshot => {
           const p = [];
           snapshot.forEach(doc => p.push({ id: doc.id, ...doc.data() }));
           setPlayers(p);
-        });
+        }, err => console.error(err));
+
+        const unsubscribeHistory = db.collection('history').orderBy('archivedAt', 'desc').limit(5).onSnapshot(snapshot => {
+          const h = [];
+          snapshot.forEach(doc => h.push({ id: doc.id, ...doc.data() }));
+          setHistory(h);
+        }, err => console.error(err));
+
+        return () => {
+          unsubscribeAuth();
+          unsubscribeSession();
+          unsubscribePlayers();
+          unsubscribeHistory();
+        };
       }, []);
 
-      const saveName = () => {
-        if(name.trim().length > 0) {
-          localStorage.setItem('cricket_name', name.trim());
-          setIsNameSet(true);
+      const showTemporaryStatus = (msg) => {
+        setStatusMsg(msg);
+        setTimeout(() => setStatusMsg(''), 3000);
+      };
+
+      const saveName = async () => {
+        const trimmed = name.trim();
+        if (trimmed.length === 0) return;
+
+        localStorage.setItem('cricket_name', trimmed);
+        setName(trimmed);
+        setIsEditingName(false);
+
+        // If player is already on the list, update their name in Firestore immediately
+        if (user) {
+          const existingPlayer = players.find(p => p.uid === user.uid);
+          if (existingPlayer) {
+            try {
+              await db.collection('players').doc(existingPlayer.id).update({ name: trimmed });
+            } catch (err) {
+              console.error("Failed to update name on roster:", err);
+            }
+          }
         }
       };
 
       const joinRoster = async () => {
         setError('');
-        if(!weeklyCode) {
-          setError('Admin has not started a session yet.');
+        if (!weeklyCode) {
+          setError('Admin has not generated a code for this session yet.');
           return;
         }
-        if(inputCode.toUpperCase() !== weeklyCode.toUpperCase()) {
+        if (inputCode.trim().toUpperCase() !== weeklyCode.toUpperCase()) {
           setError('Incorrect weekly code!');
           return;
         }
-        if(players.find(p => p.uid === user.uid)) {
-          setError('You are already on the list!');
+        if (players.find(p => p.uid === user.uid)) {
+          setError('You are already registered on the list!');
           return;
         }
         
-        await db.collection('players').add({
-          uid: user.uid,
-          name: name,
-          timestamp: firebase.firestore.FieldValue.serverTimestamp()
-        });
-        setInputCode('');
+        try {
+          await db.collection('players').add({
+            uid: user.uid,
+            name: name.trim(),
+            paid: false,
+            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+          });
+          setInputCode('');
+        } catch (err) {
+          setError('Could not join. Please check database permissions.');
+        }
       };
 
-             const adminLogin = () => {
+      const removePlayer = async (playerDoc, isSelf) => {
+        const msg = isSelf 
+          ? "Are you sure you want to remove yourself from the list?" 
+          : `Remove ${playerDoc.name} from the list?`;
+          
+        if (window.confirm(msg)) {
+          try {
+            await db.collection('players').doc(playerDoc.id).delete();
+          } catch (err) {
+            alert("Error removing player.");
+          }
+        }
+      };
+
+      const togglePaid = async (playerDoc) => {
+        if (!paymentLink && !isAdmin) return;
+        try {
+          await db.collection('players').doc(playerDoc.id).update({
+            paid: !playerDoc.paid
+          });
+        } catch (err) {
+          console.error("Error updating payment status:", err);
+        }
+      };
+
+      const adminLogin = () => {
         const pin = prompt("Enter Admin PIN:");
         if (!pin) return;
 
-        // btoa encodes to Base64, and split.reverse.join flips it backwards
-        const obfuscatedInput = btoa(pin).split('').reverse().join('');
-        
-        
+        const obfuscatedInput = btoa(pin.trim()).split('').reverse().join('');
         const targetValue = "==AO4AjM";
 
         if (obfuscatedInput === targetValue) {
           setIsAdmin(true);
+          setAdminDateInput(matchDate);
+          setAdminLinkInput(paymentLink);
         } else {
           alert("Incorrect PIN");
         }
       };
 
-
-
       const generateCode = async () => {
         const code = Math.random().toString(36).substring(2, 6).toUpperCase();
-        await db.collection('settings').doc('session').set({ code });
+        await db.collection('settings').doc('session').set({ code }, { merge: true });
+        showTemporaryStatus(`New code generated: ${code}`);
       };
 
-      const clearRoster = async () => {
-        if(window.confirm("Are you sure you want to clear the entire roster for the new week?")) {
+      const saveSessionDetails = async () => {
+        let formattedLink = adminLinkInput.trim();
+        if (formattedLink && !/^https?:\/\//i.test(formattedLink)) {
+          formattedLink = 'https://' + formattedLink;
+        }
+        await db.collection('settings').doc('session').set({
+          matchDate: adminDateInput.trim(),
+          paymentLink: formattedLink
+        }, { merge: true });
+        setAdminLinkInput(formattedLink);
+        showTemporaryStatus("Session details updated!");
+      };
+
+      const archiveAndClearRoster = async () => {
+        if (!window.confirm("Archive current session to history and clear the roster for the next match?")) {
+          return;
+        }
+
+        try {
+          // 1. Save to History if there are players
+          if (players.length > 0) {
+            const playingList = players.slice(0, 18).map(p => ({
+              name: p.name,
+              paid: !!p.paid
+            }));
+            const waitingList = players.slice(18).map(p => ({
+              name: p.name
+            }));
+
+            await db.collection('history').add({
+              matchDate: matchDate || new Date().toLocaleDateString(),
+              code: weeklyCode || 'N/A',
+              playing: playingList,
+              waitlist: waitingList,
+              archivedAt: firebase.firestore.FieldValue.serverTimestamp()
+            });
+
+            // Keep only the last 5 history records
+            const histSnap = await db.collection('history').orderBy('archivedAt', 'desc').get();
+            if (histSnap.docs.length > 5) {
+              const deleteBatch = db.batch();
+              histSnap.docs.slice(5).forEach(d => deleteBatch.delete(d.ref));
+              await deleteBatch.commit();
+            }
+          }
+
+          // 2. Clear current players
           const snapshot = await db.collection('players').get();
           const batch = db.batch();
           snapshot.forEach(doc => {
             batch.delete(doc.ref);
           });
           await batch.commit();
+
+          // 3. Reset payment link for the fresh session
+          await db.collection('settings').doc('session').set({
+            paymentLink: ''
+          }, { merge: true });
+          setAdminLinkInput('');
+          
+          showTemporaryStatus("Session archived and roster cleared!");
+        } catch (err) {
+          console.error(err);
+          alert("Error archiving session.");
         }
       };
 
-      const removePlayer = async (id) => {
-         if(window.confirm("Remove this player from the list?")) {
-             await db.collection('players').doc(id).delete();
-         }
+      const deleteHistoryItem = async (id) => {
+        if (window.confirm("Delete this history record?")) {
+          await db.collection('history').doc(id).delete();
+        }
       };
 
-      if (loading) return <div className="text-center mt-20 text-gray-500">Loading...</div>;
+      const formatDate = (dateStr) => {
+        if (!dateStr) return '';
+        const d = new Date(dateStr + 'T00:00:00');
+        if (isNaN(d)) return dateStr;
+        return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+      };
 
-      if (!isNameSet) {
+      if (loading) {
+        return <div className="text-center mt-20 text-gray-500 font-medium">Loading Cricket Roster...</div>;
+      }
+
+      if (isEditingName) {
         return (
-          <div className="max-w-md mx-auto mt-10 p-6 bg-white rounded-xl shadow-md text-center">
-            <h2 className="text-2xl font-bold mb-4">Welcome to Cricket Roster</h2>
-            <p className="mb-4 text-gray-600">Enter your display name to continue</p>
+          <div className="max-w-md mx-auto mt-12 p-6 bg-white rounded-2xl shadow-md border border-gray-100 text-center">
+            <h2 className="text-2xl font-bold mb-2 text-gray-800">Welcome to Cricket Roster 🏏</h2>
+            <p className="mb-5 text-sm text-gray-500">Enter your display name so the group knows who you are</p>
             <input 
               type="text" 
               value={name} 
               onChange={e => setName(e.target.value)} 
-              className="border p-2 w-full mb-4 rounded" 
+              onKeyDown={e => e.key === 'Enter' && saveName()}
+              className="border border-gray-300 p-3 w-full mb-4 rounded-xl focus:outline-none focus:ring-2 focus:ring-green-500 text-center font-semibold text-lg" 
               placeholder="e.g. Rahul"
+              autoFocus
             />
-            <button onClick={saveName} className="bg-blue-600 text-white px-4 py-2 rounded w-full font-bold">Save Name</button>
+            <div className="flex gap-2">
+              {localStorage.getItem('cricket_name') && (
+                <button 
+                  onClick={() => { setName(localStorage.getItem('cricket_name') || ''); setIsEditingName(false); }} 
+                  className="bg-gray-200 text-gray-700 px-4 py-3 rounded-xl w-1/3 font-bold"
+                >
+                  Cancel
+                </button>
+              )}
+              <button 
+                onClick={saveName} 
+                className="bg-green-600 hover:bg-green-700 text-white px-4 py-3 rounded-xl flex-1 font-bold shadow-sm"
+              >
+                Save Name
+              </button>
+            </div>
           </div>
         );
       }
 
       const playingXI = players.slice(0, 18);
       const waitlist = players.slice(18);
-      const alreadyJoined = players.some(p => p.uid === user?.uid);
+      const currentUserEntry = players.find(p => p.uid === user?.uid);
+      const isUserInPlaying = playingXI.some(p => p.uid === user?.uid);
 
       return (
-        <div className="max-w-md mx-auto mt-10 p-4 pb-20">
-          <div className="flex justify-between items-center mb-6">
-            <h1 className="text-2xl font-bold">Cricket Roster 🏏</h1>
-            <button onClick={() => { localStorage.removeItem('cricket_name'); setIsNameSet(false); }} className="text-sm text-gray-500 underline">Change Name</button>
+        <div className="max-w-md mx-auto mt-6 p-4 pb-24">
+          {/* Header */}
+          <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 mb-5">
+            <div className="flex justify-between items-start">
+              <div>
+                <h1 className="text-2xl font-extrabold text-gray-900">Cricket Roster 🏏</h1>
+                {matchDate ? (
+                  <p className="text-sm font-semibold text-green-700 mt-1 flex items-center gap-1">
+                    📅 Match Date: {formatDate(matchDate)}
+                  </p>
+                ) : (
+                  <p className="text-xs text-gray-400 mt-1">Date not announced yet</p>
+                )}
+              </div>
+              <div className="text-right">
+                <span className="text-xs text-gray-400 block">Playing as</span>
+                <span className="font-bold text-gray-800 text-sm">{name}</span>
+                <button 
+                  onClick={() => setIsEditingName(true)} 
+                  className="block ml-auto text-xs text-blue-600 hover:underline font-medium mt-0.5"
+                >
+                  Change Name
+                </button>
+              </div>
+            </div>
           </div>
 
-          {isAdmin ? (
-            <div className="bg-red-50 p-4 border border-red-200 rounded-lg mb-6 shadow-sm">
-              <h3 className="font-bold text-red-700 mb-2">Admin Panel</h3>
-              <p className="mb-2 text-sm">Current Code: <span className="font-bold text-lg text-black">{weeklyCode || "None set"}</span></p>
-              <div className="flex gap-2">
-                <button onClick={generateCode} className="bg-red-600 text-white px-3 py-2 rounded text-sm font-bold flex-1">New Code</button>
-                <button onClick={clearRoster} className="bg-gray-800 text-white px-3 py-2 rounded text-sm font-bold flex-1">Clear Roster</button>
+          {/* Admin Panel */}
+          {isAdmin && (
+            <div className="bg-red-50 p-4 border border-red-200 rounded-2xl mb-6 shadow-sm">
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="font-extrabold text-red-800 text-lg">Admin Control Panel</h3>
+                <button onClick={() => setIsAdmin(false)} className="text-xs bg-red-100 text-red-700 px-2.5 py-1 rounded-lg font-bold">
+                  Exit Admin
+                </button>
               </div>
-              <button onClick={() => setIsAdmin(false)} className="mt-4 text-sm text-red-600 underline block w-full text-center">Exit Admin</button>
-            </div>
-          ) : null}
 
-          {!alreadyJoined && (
-            <div className="bg-white p-4 rounded-xl shadow-sm border mb-6">
-              <h3 className="font-semibold mb-2">Join this week's match</h3>
+              {statusMsg && (
+                <div className="bg-green-100 border border-green-300 text-green-800 text-xs font-bold p-2.5 rounded-xl mb-3 text-center">
+                  {statusMsg}
+                </div>
+              )}
+
+              {/* Weekly Code Generator */}
+              <div className="bg-white p-3 rounded-xl border border-red-100 mb-3 flex justify-between items-center">
+                <div>
+                  <span className="text-xs text-gray-500 block">Weekly Join Code</span>
+                  <span className="font-mono font-extrabold text-xl tracking-wider text-gray-900">
+                    {weeklyCode || "NONE"}
+                  </span>
+                </div>
+                <button onClick={generateCode} className="bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded-xl text-xs font-bold shadow-sm">
+                  Generate New Code
+                </button>
+              </div>
+
+              {/* Match Date & Payment Link Inputs */}
+              <div className="bg-white p-3 rounded-xl border border-red-100 mb-3 space-y-3">
+                <div>
+                  <label className="text-xs font-bold text-gray-600 block mb-1">Match Date</label>
+                  <input 
+                    type="date" 
+                    value={adminDateInput} 
+                    onChange={e => setAdminDateInput(e.target.value)}
+                    className="border border-gray-300 p-2 rounded-lg w-full text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-gray-600 block mb-1">
+                    Payment Link (Leave empty until session ends)
+                  </label>
+                  <div className="flex gap-1">
+                    <input 
+                      type="url" 
+                      value={adminLinkInput} 
+                      onChange={e => setAdminLinkInput(e.target.value)}
+                      placeholder="https://tikkie.me/..."
+                      className="border border-gray-300 p-2 rounded-lg flex-1 text-sm"
+                    />
+                    {adminLinkInput && (
+                      <button 
+                        onClick={() => setAdminLinkInput('')}
+                        className="bg-gray-200 text-gray-600 px-2.5 rounded-lg text-xs font-bold"
+                        title="Clear link"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <button 
+                  onClick={saveSessionDetails} 
+                  className="bg-blue-600 hover:bg-blue-700 text-white w-full py-2 rounded-xl text-xs font-bold shadow-sm"
+                >
+                  Save Date & Payment Link
+                </button>
+              </div>
+
+              {/* Archive & Reset */}
+              <button 
+                onClick={archiveAndClearRoster} 
+                className="bg-gray-900 hover:bg-black text-white w-full py-2.5 rounded-xl text-xs font-bold shadow-sm mb-4"
+              >
+                Archive Session & Clear Roster
+              </button>
+
+              {/* Last 5 Sessions History (Admin Only) */}
+              <div className="border-t border-red-200 pt-3">
+                <h4 className="font-bold text-red-800 text-sm mb-2">Last 5 Sessions History</h4>
+                {history.length === 0 ? (
+                  <p className="text-xs text-gray-500 italic">No archived sessions yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {history.map((h) => {
+                      const paidCount = (h.playing || []).filter(p => p.paid).length;
+                      const isExpanded = expandedHistoryId === h.id;
+                      return (
+                        <div key={h.id} className="bg-white rounded-xl border border-red-100 p-2.5 text-xs">
+                          <div className="flex justify-between items-center">
+                            <button 
+                              onClick={() => setExpandedHistoryId(isExpanded ? null : h.id)}
+                              className="text-left font-bold text-gray-800 flex-1"
+                            >
+                              📅 {formatDate(h.matchDate)} — <span className="text-green-700">{(h.playing || []).length} Played</span> ({paidCount} Paid)
+                              <span className="ml-1 text-gray-400">{isExpanded ? '▲' : '▼'}</span>
+                            </button>
+                            <button 
+                              onClick={() => deleteHistoryItem(h.id)} 
+                              className="text-red-400 hover:text-red-600 font-bold ml-2 px-1"
+                              title="Delete record"
+                            >
+                              &times;
+                            </button>
+                          </div>
+                          {isExpanded && (
+                            <div className="mt-2 pt-2 border-t border-gray-100 space-y-1">
+                              <p className="font-semibold text-gray-600">Playing Roster:</p>
+                              <div className="grid grid-cols-2 gap-1">
+                                {(h.playing || []).map((pl, idx) => (
+                                  <div key={idx} className="flex justify-between bg-gray-50 px-2 py-1 rounded">
+                                    <span className="truncate">{idx + 1}. {pl.name}</span>
+                                    <span className={pl.paid ? "text-green-600 font-bold" : "text-gray-400"}>
+                                      {pl.paid ? "Paid" : "Unpaid"}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                              {h.waitlist && h.waitlist.length > 0 && (
+                                <div className="mt-2">
+                                  <p className="font-semibold text-gray-600">Waitlist:</p>
+                                  <p className="text-gray-500">{h.waitlist.map(w => w.name).join(', ')}</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Payment Banner (Visible only when Admin adds a Payment Link) */}
+          {paymentLink && (
+            <div className="bg-blue-50 border border-blue-200 p-4 rounded-2xl mb-5 shadow-sm">
+              <div className="flex justify-between items-center mb-2">
+                <div>
+                  <h3 className="font-bold text-blue-900 text-sm">💳 Match Payment Open</h3>
+                  <p className="text-xs text-blue-700">Pay via the link below, then mark your name as Paid.</p>
+                </div>
+                <a 
+                  href={paymentLink} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-sm whitespace-nowrap"
+                >
+                  Pay Now ↗
+                </a>
+              </div>
+              {isUserInPlaying && currentUserEntry && (
+                <div className="mt-3 pt-2.5 border-t border-blue-100 flex justify-between items-center">
+                  <span className="text-xs font-medium text-blue-900">Your Payment Status:</span>
+                  <button
+                    onClick={() => togglePaid(currentUserEntry)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${
+                      currentUserEntry.paid 
+                        ? 'bg-green-600 text-white shadow-sm' 
+                        : 'bg-white border border-blue-300 text-blue-700 hover:bg-blue-100'
+                    }`}
+                  >
+                    {currentUserEntry.paid ? '✓ Marked as Paid (Tap to undo)' : 'Mark as Paid'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Join Panel */}
+          {!currentUserEntry && (
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 mb-6">
+              <h3 className="font-bold text-gray-800 mb-2 text-sm">Join This Week's Match</h3>
               <div className="flex gap-2">
                 <input 
                   type="text" 
                   value={inputCode} 
                   onChange={e => setInputCode(e.target.value)} 
-                  placeholder="Enter code" 
-                  className="border p-2 flex-1 rounded uppercase font-mono text-center tracking-widest"
+                  onKeyDown={e => e.key === 'Enter' && joinRoster()}
+                  placeholder="Enter 4-digit code" 
+                  className="border border-gray-300 p-2.5 flex-1 rounded-xl uppercase font-mono text-center tracking-widest font-bold focus:outline-none focus:ring-2 focus:ring-green-500"
                   maxLength="4"
                 />
-                <button onClick={joinRoster} className="bg-green-600 text-white px-4 py-2 rounded font-bold">Join</button>
+                <button onClick={joinRoster} className="bg-green-600 hover:bg-green-700 text-white px-6 py-2.5 rounded-xl font-bold shadow-sm">
+                  Join
+                </button>
               </div>
-              {error && <p className="text-red-500 text-sm mt-2 font-medium">{error}</p>}
+              {error && <p className="text-red-500 text-xs mt-2 font-semibold">{error}</p>}
             </div>
           )}
 
+          {/* Playing Roster (Max 18) */}
           <div className="mb-6">
-            <h2 className="text-xl font-bold text-green-700 mb-3">Playing ({playingXI.length}/18)</h2>
-            <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-              {playingXI.length === 0 && <p className="p-4 text-gray-500 text-sm text-center">No players registered yet.</p>}
-              {playingXI.map((p, i) => (
-                <div key={p.id} className="flex justify-between items-center p-3 border-b last:border-0">
-                  <div>
-                    <span className="text-gray-400 w-6 inline-block font-mono text-sm">{i + 1}.</span>
-                    <span className="font-semibold">{p.name}</span>
-                    {p.uid === user?.uid && <span className="ml-2 text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full font-bold">You</span>}
+            <div className="flex justify-between items-center mb-2.5 px-1">
+              <h2 className="text-lg font-extrabold text-green-700">
+                Playing Roster ({playingXI.length}/18)
+              </h2>
+              {paymentLink && (
+                <span className="text-xs font-semibold text-gray-500">
+                  Paid: {playingXI.filter(p => p.paid).length}/{playingXI.length}
+                </span>
+              )}
+            </div>
+            
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden divide-y divide-gray-100">
+              {playingXI.length === 0 && (
+                <p className="p-6 text-gray-400 text-sm text-center">No players registered yet.</p>
+              )}
+              {playingXI.map((p, i) => {
+                const isMe = p.uid === user?.uid;
+                return (
+                  <div key={p.id} className={`flex justify-between items-center p-3.5 ${isMe ? 'bg-green-50/40' : ''}`}>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-gray-400 w-6 font-mono text-xs font-bold">{i + 1}.</span>
+                      <span className="font-bold text-gray-800 truncate">{p.name}</span>
+                      {isMe && (
+                        <span className="text-[10px] bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-extrabold">
+                          YOU
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {/* Paid Badge / Toggle */}
+                      {paymentLink && (
+                        isMe || isAdmin ? (
+                          <button
+                            onClick={() => togglePaid(p)}
+                            className={`text-xs px-2.5 py-1 rounded-lg font-bold transition ${
+                              p.paid 
+                                ? 'bg-green-100 text-green-800 border border-green-300' 
+                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
+                            }`}
+                          >
+                            {p.paid ? 'Paid ✓' : 'Mark Paid'}
+                          </button>
+                        ) : (
+                          p.paid && (
+                            <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-lg font-bold">
+                              Paid ✓
+                            </span>
+                          )
+                        )
+                      )}
+
+                      {/* Self Leave or Admin Remove */}
+                      {isMe && (
+                        <button 
+                          onClick={() => removePlayer(p, true)} 
+                          className="text-xs bg-red-50 hover:bg-red-100 text-red-600 px-2.5 py-1 rounded-lg font-bold border border-red-200"
+                        >
+                          Leave
+                        </button>
+                      )}
+                      {isAdmin && !isMe && (
+                        <button 
+                          onClick={() => removePlayer(p, false)} 
+                          className="text-red-500 hover:bg-red-50 text-lg font-bold px-2 py-0.5 rounded-lg"
+                          title="Remove player"
+                        >
+                          &times;
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  {isAdmin && <button onClick={() => removePlayer(p.id)} className="text-red-500 text-xl font-bold px-2">&times;</button>}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
+          {/* Waitlist */}
           {waitlist.length > 0 && (
             <div>
-              <h2 className="text-xl font-bold text-yellow-600 mb-3">Waitlist ({waitlist.length})</h2>
-              <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-                {waitlist.map((p, i) => (
-                  <div key={p.id} className="flex justify-between items-center p-3 border-b last:border-0 bg-yellow-50">
-                    <div>
-                      <span className="text-gray-400 w-8 inline-block font-mono text-sm">{i + 19}.</span>
-                      <span className="text-gray-800">{p.name}</span>
-                      {p.uid === user?.uid && <span className="ml-2 text-xs bg-yellow-200 text-yellow-800 px-2 py-1 rounded-full font-bold">You</span>}
+              <h2 className="text-lg font-extrabold text-amber-600 mb-2.5 px-1">
+                Waitlist ({waitlist.length})
+              </h2>
+              <div className="bg-white rounded-2xl shadow-sm border border-amber-200 overflow-hidden divide-y divide-amber-100">
+                {waitlist.map((p, i) => {
+                  const isMe = p.uid === user?.uid;
+                  return (
+                    <div key={p.id} className="flex justify-between items-center p-3.5 bg-amber-50/40">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-amber-600/70 w-7 font-mono text-xs font-bold">{i + 19}.</span>
+                        <span className="font-semibold text-gray-800 truncate">{p.name}</span>
+                        {isMe && (
+                          <span className="text-[10px] bg-amber-200 text-amber-900 px-2 py-0.5 rounded-full font-extrabold">
+                            YOU
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isMe && (
+                          <button 
+                            onClick={() => removePlayer(p, true)} 
+                            className="text-xs bg-red-50 hover:bg-red-100 text-red-600 px-2.5 py-1 rounded-lg font-bold border border-red-200"
+                          >
+                            Leave
+                          </button>
+                        )}
+                        {isAdmin && !isMe && (
+                          <button 
+                            onClick={() => removePlayer(p, false)} 
+                            className="text-red-500 hover:bg-red-50 text-lg font-bold px-2 py-0.5 rounded-lg"
+                            title="Remove player"
+                          >
+                            &times;
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    {isAdmin && <button onClick={() => removePlayer(p.id)} className="text-red-500 text-xl font-bold px-2">&times;</button>}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
 
+          {/* Hidden Admin Trigger */}
           <div className="mt-16 text-center">
-            <button onClick={adminLogin} className="text-gray-100 p-4">.</button>
+            <button onClick={adminLogin} className="text-gray-300 p-4 focus:outline-none">.</button>
           </div>
         </div>
       );
@@ -241,4 +680,3 @@ storageBucket: "cricket-roster-845e1.firebasestorage.app",
   </script>
 </body>
 </html>
-
