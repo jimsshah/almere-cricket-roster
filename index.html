@@ -93,16 +93,15 @@ storageBucket: "cricket-roster-845e1.firebasestorage.app",
         setInputCode('');
       };
 
-       const adminLogin = () => {
+             const adminLogin = () => {
         const pin = prompt("Enter Admin PIN:");
         if (!pin) return;
 
-        // Obfuscate the input to check against the hidden value
         // btoa encodes to Base64, and split.reverse.join flips it backwards
         const obfuscatedInput = btoa(pin).split('').reverse().join('');
         
-        // This is the obfuscated string for "2088" (which is "==AOOAjM")
-        const targetValue = "==AOOAjM";
+        
+        const targetValue = "==AO4AjM";
 
         if (obfuscatedInput === targetValue) {
           setIsAdmin(true);
@@ -110,6 +109,7 @@ storageBucket: "cricket-roster-845e1.firebasestorage.app",
           alert("Incorrect PIN");
         }
       };
+
 
 
       const generateCode = async () => {
