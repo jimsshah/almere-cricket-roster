@@ -1,1 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cricket Roster</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const firebaseConfig = {
+      apiKey: "AIzaSyAUfMZ8Dmhv6pYpCbidp1bEa5qiAPGIOgA",
+      authDomain: "cricket-roster-845e1.firebaseapp.com",
+      projectId: "cricket-roster-845e1",
+storageBucket: "cricket-roster-845e1.firebasestorage.app",
+    messagingSenderId: "665150167375",
+    appId: "1:665150167375:web:4eede345268acf5b9a8d3a",
+    };
+
+    if (!firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+    }
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    const App = () => {
+      const [user, setUser] = React.useState(null);
+      const [name, setName] = React.useState(localStorage.getItem('cricket_name') || '');
+      const [isNameSet, setIsNameSet] = React.useState(!!localStorage.getItem('cricket_name'));
+      const [weeklyCode, setWeeklyCode] = React.useState('');
+      const [inputCode, setInputCode] = React.useState('');
+      const [players, setPlayers] = React.useState([]);
+      const [isAdmin, setIsAdmin] = React.useState(false);
+      const [loading, setLoading] = React.useState(true);
+      const [error, setError] = React.useState('');
+
+      React.useEffect(() => {
+        auth.signInAnonymously().catch(err => console.error(err));
+        
+        auth.onAuthStateChanged((u) => {
+          setUser(u);
+          setLoading(false);
+        });
+
+        db.collection('settings').doc('session').onSnapshot(doc => {
+          if (doc.exists) {
+            setWeeklyCode(doc.data().code);
+          }
+        });
+
+        db.collection('players').orderBy('timestamp', 'asc').onSnapshot(snapshot => {
+          const p = [];
+          snapshot.forEach(doc => p.push({ id: doc.id, ...doc.data() }));
+          setPlayers(p);
+        });
+      }, []);
+
+      const saveName = () => {
+        if(name.trim().length > 0) {
+          localStorage.setItem('cricket_name', name.trim());
+          setIsNameSet(true);
+        }
+      };
+
+      const joinRoster = async () => {
+        setError('');
+        if(!weeklyCode) {
+          setError('Admin has not started a session yet.');
+          return;
+        }
+        if(inputCode.toUpperCase() !== weeklyCode.toUpperCase()) {
+          setError('Incorrect weekly code!');
+          return;
+        }
+        if(players.find(p => p.uid === user.uid)) {
+          setError('You are already on the list!');
+          return;
+        }
+        
+        await db.collection('players').add({
+          uid: user.uid,
+          name: name,
+          timestamp: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        setInputCode('');
+      };
+
+      const adminLogin = async () => {
+        const pin = prompt("Enter Admin PIN:");
+        if (!pin) return;
+
+        const msgBuffer = new TextEncoder().encode(pin);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+        const targetHash = "9db3b2880c5ceee081d39414e8574d6c6e7a5eb4a86cf7484646b9aef4da3cbe";
+
+        if (hashHex === targetHash) {
+          setIsAdmin(true);
+        } else {
+          alert("Incorrect PIN");
+        }
+      };
+
+      const generateCode = async () => {
+        const code = Math.random().toString(36).substring(2, 6).toUpperCase();
+        await db.collection('settings').doc('session').set({ code });
+      };
+
+      const clearRoster = async () => {
+        if(window.confirm("Are you sure you want to clear the entire roster for the new week?")) {
+          const snapshot = await db.collection('players').get();
+          const batch = db.batch();
+          snapshot.forEach(doc => {
+            batch.delete(doc.ref);
+          });
+          await batch.commit();
+        }
+      };
+
+      const removePlayer = async (id) => {
+         if(window.confirm("Remove this player from the list?")) {
+             await db.collection('players').doc(id).delete();
+         }
+      };
+
+      if (loading) return <div className="text-center mt-20 text-gray-500">Loading...</div>;
+
+      if (!isNameSet) {
+        return (
+          <div className="max-w-md mx-auto mt-10 p-6 bg-white rounded-xl shadow-md text-center">
+            <h2 className="text-2xl font-bold mb-4">Welcome to Cricket Roster</h2>
+            <p className="mb-4 text-gray-600">Enter your display name to continue</p>
+            <input 
+              type="text" 
+              value={name} 
+              onChange={e => setName(e.target.value)} 
+              className="border p-2 w-full mb-4 rounded" 
+              placeholder="e.g. Rahul"
+            />
+            <button onClick={saveName} className="bg-blue-600 text-white px-4 py-2 rounded w-full font-bold">Save Name</button>
+          </div>
+        );
+      }
+
+      const playingXI = players.slice(0, 18);
+      const waitlist = players.slice(18);
+      const alreadyJoined = players.some(p => p.uid === user?.uid);
+
+      return (
+        <div className="max-w-md mx-auto mt-10 p-4 pb-20">
+          <div className="flex justify-between items-center mb-6">
+            <h1 className="text-2xl font-bold">Cricket Roster 🏏</h1>
+            <button onClick={() => { localStorage.removeItem('cricket_name'); setIsNameSet(false); }} className="text-sm text-gray-500 underline">Change Name</button>
+          </div>
+
+          {isAdmin ? (
+            <div className="bg-red-50 p-4 border border-red-200 rounded-lg mb-6 shadow-sm">
+              <h3 className="font-bold text-red-700 mb-2">Admin Panel</h3>
+              <p className="mb-2 text-sm">Current Code: <span className="font-bold text-lg text-black">{weeklyCode || "None set"}</span></p>
+              <div className="flex gap-2">
+                <button onClick={generateCode} className="bg-red-600 text-white px-3 py-2 rounded text-sm font-bold flex-1">New Code</button>
+                <button onClick={clearRoster} className="bg-gray-800 text-white px-3 py-2 rounded text-sm font-bold flex-1">Clear Roster</button>
+              </div>
+              <button onClick={() => setIsAdmin(false)} className="mt-4 text-sm text-red-600 underline block w-full text-center">Exit Admin</button>
+            </div>
+          ) : null}
+
+          {!alreadyJoined && (
+            <div className="bg-white p-4 rounded-xl shadow-sm border mb-6">
+              <h3 className="font-semibold mb-2">Join this week's match</h3>
+              <div className="flex gap-2">
+                <input 
+                  type="text" 
+                  value={inputCode} 
+                  onChange={e => setInputCode(e.target.value)} 
+                  placeholder="Enter code" 
+                  className="border p-2 flex-1 rounded uppercase font-mono text-center tracking-widest"
+                  maxLength="4"
+                />
+                <button onClick={joinRoster} className="bg-green-600 text-white px-4 py-2 rounded font-bold">Join</button>
+              </div>
+              {error && <p className="text-red-500 text-sm mt-2 font-medium">{error}</p>}
+            </div>
+          )}
+
+          <div className="mb-6">
+            <h2 className="text-xl font-bold text-green-700 mb-3">Playing ({playingXI.length}/18)</h2>
+            <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+              {playingXI.length === 0 && <p className="p-4 text-gray-500 text-sm text-center">No players registered yet.</p>}
+              {playingXI.map((p, i) => (
+                <div key={p.id} className="flex justify-between items-center p-3 border-b last:border-0">
+                  <div>
+                    <span className="text-gray-400 w-6 inline-block font-mono text-sm">{i + 1}.</span>
+                    <span className="font-semibold">{p.name}</span>
+                    {p.uid === user?.uid && <span className="ml-2 text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full font-bold">You</span>}
+                  </div>
+                  {isAdmin && <button onClick={() => removePlayer(p.id)} className="text-red-500 text-xl font-bold px-2">&times;</button>}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {waitlist.length > 0 && (
+            <div>
+              <h2 className="text-xl font-bold text-yellow-600 mb-3">Waitlist ({waitlist.length})</h2>
+              <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+                {waitlist.map((p, i) => (
+                  <div key={p.id} className="flex justify-between items-center p-3 border-b last:border-0 bg-yellow-50">
+                    <div>
+                      <span className="text-gray-400 w-8 inline-block font-mono text-sm">{i + 19}.</span>
+                      <span className="text-gray-800">{p.name}</span>
+                      {p.uid === user?.uid && <span className="ml-2 text-xs bg-yellow-200 text-yellow-800 px-2 py-1 rounded-full font-bold">You</span>}
+                    </div>
+                    {isAdmin && <button onClick={() => removePlayer(p.id)} className="text-red-500 text-xl font-bold px-2">&times;</button>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-16 text-center">
+            <button onClick={adminLogin} className="text-gray-100 p-4">.</button>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
 
